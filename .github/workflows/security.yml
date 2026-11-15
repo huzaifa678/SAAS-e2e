@@ -1,0 +1,36 @@
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CONFTEST_VERSION: 0.56.0
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install conftest
+        run: |
+          curl -sSfL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+
+      - name: Dockerfile Policy as Code (conftest / OPA)
+        run: |
+          # Unit-test the Rego policy itself first.
+          conftest verify -p policy/docker
+          # Then evaluate every Dockerfile against it.
+          mapfile -t DFILES < <(find . -type f \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) \
+            -not -path '*/.git/*' -not -path '*/.venv/*' | sort)
+          echo "Dockerfiles: ${DFILES[*]}"
+          for df in "${DFILES[@]}"; do
+            echo "== ${df} =="
+            conftest test "${df}" --parser dockerfile -p policy/docker
+          done

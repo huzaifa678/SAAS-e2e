@@ -1,0 +1,110 @@
+name: saas-e2e CI
+
+# Builds the e2e-runner image, gates it on Trivy (scan-before-push, same policy
+# as the services), pushes to the `saas-e2e` ECR repo, and promotes the tag into
+# the CD repo's `e2e/values-staging.yaml` so ArgoCD runs the new runner on its
+# next staging sync. Lint + a dry import run keep the suite itself honest.
+
+on:
+  push:
+    branches: [main]
+    paths: ["**"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.11"
+      - run: uv sync
+      - name: Lint (ruff)
+        run: uv run ruff check .
+      - name: Format check (black)
+        run: uv run black --check .
+      - name: Collect-only (suite imports + markers resolve)
+        run: uv run pytest --collect-only -q
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: "us-east-1"
+
+      - name: Get ECR URL
+        id: ecr
+        run: |
+          ECR_URL=$(aws ecr describe-repositories --repository-names saas-e2e \
+            --query 'repositories[0].repositoryUri' --output text)
+          echo "url=$ECR_URL" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image (load locally for scanning)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.ecr.outputs.url }}:sha-${{ github.sha }}
+
+      - name: Trivy image scan (scan-before-push gate)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.ecr.outputs.url }}:sha-${{ github.sha }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+        env:
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push scanned image
+        run: docker push "${{ steps.ecr.outputs.url }}:sha-${{ github.sha }}"
+
+      # Promote via the SAAS GitOps Bot (GitHub App) so the commit is authored by
+      # the bot and scoped to the CD repo — same app the services use.
+      - name: Generate GitOps Bot token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          owner: huzaifa678
+          repositories: SAAS-Continious-Delivery
+
+      - name: Promote tag into CD repo (e2e/chart/values-staging.yaml)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTALL_ID: ${{ steps.app-token.outputs.installation-id }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/huzaifa678/SAAS-Continious-Delivery.git /tmp/cd
+          cd /tmp/cd
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          yq -i '.image.tag = "sha-${{ github.sha }}"' e2e/chart/values-staging.yaml
+          git config user.name "SAAS-gitops-bot[bot]"
+          git config user.email "${INSTALL_ID}+saas-gitops-bot[bot]@users.noreply.github.com"
+          git add e2e/chart/values-staging.yaml
+          git commit -m "e2e: promote sha-${{ github.sha }} to staging" || echo "no change"
+          git push

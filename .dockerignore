@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+deploy
+*.md
+results
+report.xml
+.DS_Store

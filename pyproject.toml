@@ -1,0 +1,50 @@
+[project]
+name = "saas-e2e"
+version = "0.1.0"
+description = "Cross-service end-to-end smoke suite for the SAAS platform (ArgoCD PostSync)."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "httpx-sse>=0.4",
+    "pytest>=8.2",
+    "tenacity>=8.3",
+    # usage-ETL event-first smoke (Avro over Kafka + MSK IAM):
+    "confluent-kafka[avro,schemaregistry]>=2.5",
+    "fastavro>=1.9",
+    "aws-msk-iam-sasl-signer-python>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "black>=24.4",
+    "pytest-xdist>=3.6",   # parallelism now; the base for sharding later
+    "pytest-split>=0.9",   # `--splits N --group K` sharding when the suite grows
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra -v"
+markers = [
+    "smoke: cross-service post-deploy smoke test",
+    "health: gateway/service liveness & readiness",
+    "auth: auth-service path",
+    "subscription: subscription-service path",
+    "billing: billing-service path",
+    "agent: agent-service request/response path",
+    "sse: agent-service Server-Sent Events streaming path",
+    "usage: usage-service synchronous read API (aggregates, search)",
+    "usage_etl: usage-service event-driven ETL pipeline (slow; polls)",
+    "kafka: requires Kafka + Schema Registry",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.black]
+line-length = 100
+
+[tool.uv]
+package = false
